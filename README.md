@@ -16,11 +16,11 @@ Utilizando el conjunto de datos Real estate valuation Data Set se lleva a cabo u
 
  + Descripción de la metodología
  
- Se llevó a cabo un análisis de predicción, cuyo principal motivo era identificar la variables de mayor inpacto en el el precio por unidad de área de la vivienda en Taiwan y el modelo con mejor ajuste en la predicción.
+ Se llevó a cabo un análisis de predicción, cuyo principal motivo era identificar la variables de mayor inpacto en el el precio por unidad de área de la vivienda en Taiwan y el modelo con mejor ajuste en la predicción,tambien se hace una optimización de los hiperparámetros de los modelos elastic net y XGboost.
  
  + Resultados
  
- Archivo Regresion.html
+ Archivo Regresion_optimizacion.html
  
  + Bibliografía
  
