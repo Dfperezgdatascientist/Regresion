@@ -1,0 +1,555 @@
+---
+title: "Regresión-optimización de hiperpárametros"
+author: "*Daniel Felipe Pérez Grajales* <br/> *Universidad Nacional de Colombia - Sede Medellín* <br/><br/> *Efraín Galvis Amaya* <br/> *Universidad Nacional de Colombia - Sede Medellín* <br/> <br/> **Profesor**: *Juan David Ospina Arango* <br/> *Universidad Nacional de Colombia - Sede Medellín* <br/> *Departamento de Ciencias de la Computación y de la Decisión* <br/> *Decisiones bajo incertidumbre (Optimización para aprendizaje de máquina)*"
+date: "04 de junio de 2021"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, cache = TRUE)
+library(readxl)
+library(tidyr)
+library(tidyverse)
+library(ggthemes)
+library(Hmisc)
+library(caret)
+library(DT)
+library(glmnet)
+library(readr)# for fast reading of input files
+library(mice)      # mice package for Multivariate Imputation by 
+library(keras)     # for neural nets
+library(corrplot)  # for correlation
+library(progress)
+library(GGally)
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+library(gbm)
+library(MASS)
+library(ISLR)
+library(xgboost)  
+library(pROC)
+library(e1071)
+
+options(warn=-1)###
+df <- read_excel("Data/Real estate valuation data set.xlsx")
+df <- df[,-1]
+colnames(df) <- c("x1","x2","x3","x4","x5","x6","y")
+
+```
+
+## Predicción del precio de la vivienda en Taiwan
+
+Utilizando el conjunto de datos Real estate valuation data set Data Set lleve a un ejercicio del predicción del precio de la vivienda en Taiwan utilizando los siguientes métodos de predicción:
+
+* Regresión lineal (clásica y elastic net)
+
+* Ensambles de árboles: bosques aleatorios y XGBoost
+
+* Máquinas de soporte vectorial
+
+* Redes neuronales
+
+Es posible dividir el conjunto de datos en entrenamiento y validación o uzar un esquema de validación cruzada.
+
+El conjunto de datos se referncia en la siguiente cita:
+Citación: Yeh, I. C., & Hsu, T. K. (2018). Building real estate valuation models with comparative approach through case-based reasoning. Applied Soft Computing, 65, 260-271.
+La definición de las variables es la siguiente:
+
++ $X1$: fecha de la transacción (por ejemplo 2013.250=2013 Marzo, * 2013.500=2013 Junio, etc.)
+
++ $X2$: edad de la casa en años
+
++ $X3$: distancial al MRT (transporte masivo) más cercano en metros
+
++ $X4$: número de tiendas de conveniencia en el vecindario (entero)
+
++ $X5$: latitud (unidad: grados)
+
++ $X6$: longitude (unidad: grados)
+
++ $Y$: precio por unidad de área (10000 Nuevos dólares taiwaneses/ 3.3 \(m^2\))
+
+### Data
+
+```{r , echo=FALSE}
+
+datatable(head(df))
+
+```
+
+### Descriptivo general
+
+```{r , echo=FALSE}
+paste("Identificación de NA'S por variable")
+
+apply(df, 2, function(x){sum(is.na(x))})/100 # no hay NA's
+
+print("Descriptivo1 de variables")
+
+summary(df)
+
+print("Descriptivo2 de variables")
+
+describe(df)
+
+```
+
+### Análisis de correlación de variables
+
+```{r , echo=FALSE}
+df %>%
+  gather(x, y, x1:x4) %>%
+  ggplot(aes(x = y)) +
+  facet_wrap(~ x, ncol = 3, scales = "free") +
+  geom_density(alpha = 0.5) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1),
+        legend.position = "top") +
+  scale_color_tableau() +
+  scale_fill_tableau()
+
+par(mfrow=c(2,2))
+plot(df$x2, df$y)
+plot(df$x3, df$y)
+plot(df$x4, df$y)
+par(mfrow=c(1,1))
+grid()
+```
+
+```{r , echo=FALSE}
+# Analisis de correlacion ####
+GGally::ggpairs(head(df, lower = list(continuous = "smooth"),
+        diag = list(continuous = "barDiag"), axisLabels = "none"),
+        lower = list(continuous = wrap("cor", alpha = 1,size=3), 
+                     combo = "box"),
+        upper = list(continuous = wrap("smooth", alpha = 1, size=1, color='blue')),progress=F)+
+  theme(axis.text = element_text(size = 6))
+#grid()
+```
+
+Del análisis preliminar se pueden extraer las siguientes conclusiones:
+
++ La variable que tienen una mayor relación lineal con el precio por unidad de área: $x5$: Lat y $x6$: Long es decir la ubicación del inmueble ($r= 0.823$ y $r= 0.760$).
+
++ La variable que tienen medianamente una relación lineal con el precio por unidad de área: $X3$:distancial al MRT (transporte masivo) más cercano en metros ($r= -0.507$).
+
++ $X3$:distancial al MRT (transporte masivo) más cercano en metros y $X4$: número de tiendas de conveniencia en el vecindario (entero) están medianamente correlacionados ($r = -0.729$) y existe una dependencia lineal por lo que posiblemente no sea útil introducir ambos predictores en los modelos.
+
++ $X2$: edad de la casa en años y $X4$:número de tiendas de conveniencia en el vecindario (entero) están correlacionados ($r = 0.894$) y existe una dependencia lineal por lo que posiblemente no sea útil introducir ambos predictores en los modelos.
+
++ La variable $X3$: distancial al MRT (transporte masivo) más cercano en metros se debería hacer una transformación que posiblemente haría más normal su distribución.
+
+## Preparación de la información para ser modelada:
+
+* selección de la muestra
+
+```{r , echo=FALSE}
+#selección 
+
+set.seed(20)
+n_val<-round(0.2*dim(df)[1])
+ix_val<-sample(dim(df)[1],n_val,replace = F)
+#datatable(head(ix_val))
+```
+
+* Escalado de datos:
+
+```{r}
+X<-df[c('x1','x2','x3','x4')]
+
+Y<-df[c("y")]
+
+```
+
+**Advertencia** : si se escala la variable respuesta restándole la media entonces en los modelos lineales no se incluye un intercepto
+
+se eliminan las variables lat y long porque no son faciles de interpretar.
+
+```{r}
+X_scaled<-as.data.frame(scale(X))
+media<-attr(X_scaled,"scaled:center")
+std_dev<-attr(X_scaled,"scaled:scale")
+datatable(head(X_scaled))
+```
+
+# creamos nuevas variables
+
+```{r , echo=TRUE}
+X_scaled$x1_2<-X_scaled$x1^2
+X_scaled$x2_2<-X_scaled$x2^2
+X_scaled$x3_2<-X_scaled$x3^2
+X_scaled$x4_2<-X_scaled$x4^2
+datatable(head(X_scaled))
+```
+
+# Base de entrenamiento y base de validación:
+
+```{r , echo=TRUE}
+X_tr<-X_scaled[-ix_val,]
+X_vl<-X_scaled[ix_val,]
+Y_tr<-Y[-ix_val,]
+Y_vl<-Y[ix_val,]
+```
+
+
+### Modelo lineal
+
+* Calculemos un modelo lineal:
+
+```{r}
+df_tr<-data.frame(Y_tr,X_tr)
+m01<-lm(y ~.,data=df_tr)
+summary(m01)
+```
+
+* Calculo del error cuadrático medio (rmse)
+
+
+mide cuanto se degrada la predicción del modelo en este caso fue de:
+
+```{r}
+rmse_m01 <- sqrt(mean((residuals(m01))^2))
+rmse_m01
+```
+
+precio por unidad de área 
+
+* Evaluemos la importancia de una variable por su impacto en la predicción:
+
+```{r}
+permutar_col<-function(i,df){
+  valores_permutados<-sample(df[,i],dim(df)[1])
+  df[,i]<-valores_permutados
+  return(df)
+  
+}
+```
+
+
+```{r}
+
+df_x1 <- permutar_col(2,df_tr)
+m01_x1 <-lm(y~.,data=df_x1)
+rmse_m01_x1 <- sqrt(mean((residuals(m01_x1))^2))
+rmse_m01_x1
+```
+
+Aporte de la variable `x1` a la predicción:
+
+```{r}
+
+aportex1 <- (rmse_m01 - rmse_m01_x1)/rmse_m01*100
+aportex1
+```
+
+Este valor me determina la importancia de distorcionar una variable predictora y se identifica cual aporta más al crecimiento del error cuadrático medio,distorción de la predicción
+
+
+```{r}
+
+importancia_col<-function(i,df){
+  modelo_base <-lm(y~.,data=df)
+  rmse_base <- sqrt(mean((residuals(modelo_base))^2))
+  df_perturbado <- permutar_col(i,df)
+  modelo_perturbado <-lm(y~.,data=df_perturbado)
+  rmse_perturbado <- sqrt(mean((residuals(modelo_perturbado))^2))
+  aportevar <- (rmse_base  - rmse_perturbado)/rmse_base*100
+  return(aportevar)
+  
+}
+
+```
+
+* Calculamos la importancia de las ocho variables:
+
+```{r}
+set.seed(31)
+
+importancia <- sapply(2:9, importancia_col,df=df_tr)
+importancia
+```
+
+* Graficar importancia de la variables datos perturbados
+
+Estabilizar importancia media
+
+```{r}
+set.seed(32)
+importancia <- sapply(rep(2:9,200), importancia_col,df=df_tr)
+impo_mat <- matrix(importancia,ncol = 8,byrow = T)
+importancia_media <- apply(impo_mat,2, mean)
+barplot(-importancia_media, names.arg = names(df_tr)[2:9], main="Importancia de las variables datos perturbados")
+print(importancia_media)
+
+```
+
+* Importancia por coeficientes 
+
+```{r}
+barplot(abs(coef(m01)[2:9]),main="Importancia de las variables coeficientes del m01")
+
+```
+
+* importancia por estadístico t
+
+```{r}
+resumen <- summary(m01)
+estadistico<- resumen$coefficients[2:9,3]
+barplot(abs(estadistico),main="Importancia de las variables Abs(t_statistic)")
+```
+
+La variable más importante para la predicción del precio por unidad de área es $x3$: distancial al MRT (transporte masivo) más cercano en metros
+
+
+```{r}
+# Estudiemos el efecto de la correlación en la importancia de variables en bosques aleatorios
+# library(randomForest)
+
+```
+
+
+```{r}
+# Creemos un modelo de bosques aleatorios
+# mrf01 <- randomForest(y ~ ., data = df_tr, importance = TRUE)
+# print(mrf01)
+#Importancia de la variables con libreria caret
+# varImpPlot(mrf01)
+```
+
+
+```{r}
+# df_tr_dist<-df_tr
+# df_tr_dist$perturbacion<-df_tr_dist$x3 + runif(331)
+# mrf02 <- randomForest(y ~ ., data = df_tr_dist, importance = TRUE)
+# print(mrf02)
+# varImpPlot(mrf02)
+# cor(df_tr_dist$perturbacion,df_tr_dist$x3)
+```
+
+
+```{r , echo=FALSE}
+# calc_rmse = function(actual, predicted) {
+#   sqrt(mean((actual - predicted) ^ 2))
+# }
+# 
+# # Compute R^2 from true and predicted values
+# eval_results <- function(true, predicted, df) {
+#   SSE <- sum((predicted - true)^2)
+#   SST <- sum((true - mean(true))^2)
+#   R_square <- 1 - SSE / SST
+#   RMSE = sqrt(SSE/nrow(df))
+#   
+#   
+# # Model performance metrics
+#   data.frame(
+#     RMSE = RMSE,
+#     Rsquare = R_square
+#   )
+#   
+# }
+
+```
+
+
+### Regresión lineal (elastic net)
+
+* Definición de los parámetros de optimización:
+
+```{r, echo=TRUE}
+hiperparametros <- expand.grid(
+  alpha = (1:100)/100,
+  lambda = 10^(-5:2)
+)
+control_optimizacion <- caret::trainControl(method = "LGOCV", number = 10,p=0.2)
+```
+
+* optimización Modelo:
+
+```{r, echo=TRUE}
+m02 <- train(
+  y~-1+.,data = df_tr,
+  method = "glmnet",
+  trControl = control_optimizacion,
+  tuneGrid = hiperparametros
+)
+```
+
+* Mejor modelo elastic net con el RMSE más bajo
+
+```{r}
+datatable(head(m02$results[order(m02$results[3]),]))
+```
+
+Mejor rmse óptimizado del modelo elastic net:
+```{r}
+rmse_ela_op<-as.numeric(head(m02$results[order(m02$results[3]),],1)[,3])
+rmse_ela_op
+```
+
+### Ensambles de árboles
+
+bosques aleatorios 
+
+```{r , echo=FALSE}
+# Random Forest ####
+mrf03 <- randomForest(y ~ ., data = df_tr, importance = TRUE)
+print(mrf03)
+varImpPlot(mrf03)
+```
+
+se concluye que la variable mas importante es $X3$:distancia al MRT (transporte masivo) más cercano en metros, seguido de la misma variable elevada al cuadrado,en tercer lugar la variable $X4$: número de tiendas de conveniencia en el vecindario (entero)  
+
+
+El rmse del Random Forest mide cuanto se degrada la predicción del modelo en este caso fue de:
+```{r , echo=FALSE}
+# Random Forest ####
+rmse_rf<-as.numeric(sqrt(mrf03$mse[length(mrf03$mse)]))
+rmse_rf
+```
+
+precio por unidad de área 
+
+
+### XGBoost
+
+```{r , echo=FALSE}
+
+# XGboost ####
+
+m_xgbc = xgboost::xgboost(params = list(max.depth = 2),data = as.matrix(X_tr),label = Y_tr$y, nrounds = 10)
+#print(m_xgbc)
+```
+
+El rmse del XGboost mide cuanto se degrada la predicción del modelo en este caso fue de:
+```{r , echo=FALSE}
+rmse_xgbc<-as.numeric(m_xgbc$evaluation_log[10,2])
+rmse_xgbc
+```
+
+precio por unidad de área
+
+
+## optimización XGboost
+
+* Definición de los parámetros de optimización:
+
+```{r , echo=TRUE}
+gbmGrid2 <-  expand.grid(interaction.depth = c(1, 5, 9), 
+                         n.trees = (1:30)*50, 
+                         shrinkage = c(0.0001, 0.001, 0.01, 0.1, 0.2, 0.3),
+                         n.minobsinnode = 20)
+
+fitControl <- trainControl(## 10-fold CV
+  method = "repeatedcv",
+  number = 10,
+  repeats = 10)
+```
+
+
+* optimización Modelo:
+
+```{r , echo=TRUE}
+set.seed(825)
+gbmFit2 <- train(y ~ ., data = df_tr,
+                 method = "gbm", 
+                 trControl = fitControl, 
+                 verbose = FALSE, 
+                 tuneGrid = gbmGrid2)
+
+```
+
+* hiperparámetros mejor modelo XGboost con el RMSE más bajo
+
+```{r}
+datatable(head(gbmFit2$results[order(gbmFit2$results[5]),]))
+```
+
+Mejor rmse óptimizado del modelo XGboost es:
+
+```{r}
+rmse_xgbc_op<-as.numeric(head(gbmFit2$results[order(gbmFit2$results[5]),],1)[5])
+rmse_xgbc_op
+```
+
+
+### Máquinas de soporte vectorial
+
+```{r , echo=FALSE}
+
+m_svm <- svm(y ~ ., data = df_tr,type = 'eps-regression')
+y_svm_pred <- predict(m_svm)
+error_svm <- Y_tr$y - y_svm_pred
+rmse_svm <- sqrt(mean(error_svm^2))
+
+#(RMSEsvm=rmse(pred_valid_svm,test$y))
+
+```
+
+el modelo de máquinas de soporte vectorial tiene error cuadrático medio de:
+
+```{r , echo=FALSE}
+print(rmse_svm)
+```
+precio por unidad de área
+
+
+### Redes neuronales
+
+```{r , echo=FALSE}
+# Red neuronal ####
+library(nnet)
+
+set.seed(199)
+nnet <- nnet(y ~ ., data=df_tr, size=10, linout=TRUE, skip=TRUE, MaxNWts=10000, trace=FALSE, maxit=100)
+
+```
+
+El rmse del Red neuronal que mide cuanto se degrada la predicción del modelo en este caso fue de:
+```{r}
+rmse_nnet <- sqrt(mean((nnet$residuals)^2))
+rmse_nnet
+```
+precio por unidad de área
+
+
+## Preguntas adicionales
+
+*1. ¿Qué variables tienen el mayor impacto en el precio de la vivienda?*
+
+
+Las variables $X3$:distancia al MRT (transporte masivo) más cercano en metros en el análisis de correlación se evidencia una dependecia lineal medianamente al precio por unidad de área de la vivienda en Taiwan.en los modelos regresión lineal se identificó como la variable más importante, al igual que en el modelo de bosque aleatorios.
+
+*¿Cómo aporta cada modelo al conocimiento de este impacto?*
+
+En la identificación de la importancia de las variables al modelo, el impacto se nota en el error cuadratico medio(RMSE) al hacer distorsión en las variables más importantes como lo fue $x3$ era significativo el aporte al error de predicción del modelo.
+
+*2. ¿Cuál es el mejor modelo entre los usados para resolver este problema?*
+
+El mejor modelo con un RMSE de:
+```{r}
+rmse_nnet
+```
+precio por unidad de área de la vivienda en Taiwan y fue la red neuronal con el menor error cuadrático medio.
+
+*¿Qué criterios se pueden utilizar para responder a esta pregunta?*
+
+para este caso por los modelos de: Regresión lineal (clásica y elastic net),Ensambles de árboles: bosques aleatorios y XGBoost,Máquinas de soporte vectorial, Redes neuronales, se busca una medida del error de ajuste de la predicción que se pueda calcular en todos los modelos como lo es el error cuadrático medio(RMSE) y se pueda comparar entre todos.El de menor RMSE será el que tiene menor error al predecir el precio por unidad de área de la vivienda en Taiwan.
+
+De acuerdo a los siguientes resultados:
+
+```{r , echo=FALSE}
+# conclusiones ####
+
+tabla_final <- data.frame(rmse_m01,
+                          rmse_ela_op,
+                          rmse_rf,
+                          rmse_xgbc_op,
+                          rmse_svm,
+                          rmse_nnet)
+
+tabla_final
+
+```
+
